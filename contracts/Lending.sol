@@ -5,6 +5,7 @@ import "@openzeppelin/contracts/access/Ownable.sol";
 import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@chainlink/contracts/src/v0.8/interfaces/AggregatorV3Interface.sol";
+import "hardhat/console.sol";
 
 error Lending__TokenNotApproved();
 error Lending__TransferFailed();
@@ -12,8 +13,6 @@ error Lending__InsufficentTokensInPlatform();
 error Lending__AmountIsZero();
 
 contract Lending is Ownable, ReentrancyGuard {
-    constructor() {}
-
     // 5% liquidation reward
     uint256 private constant LIQUIDATION_REWARD = 5;
     // LTV of 80% or greater, user can be liquidated, 1/0.8 = 1.25
@@ -32,6 +31,7 @@ contract Lending is Ownable, ReentrancyGuard {
     address[] public s_approvedTokenList;
 
     event Deposit(address indexed user, address indexed token, uint256 indexed amount);
+    event Withdraw(address indexed user, address indexed token, uint256 indexed amount);
     event Borrow(address indexed user, address indexed token, uint256 indexed amount);
     event TokenApproved(address indexed token, address indexed priceFeed);
     event Repay(address indexed user, address indexed token, uint256 indexed amount);
@@ -67,6 +67,8 @@ contract Lending is Ownable, ReentrancyGuard {
     }
 
     function withdraw(address token, uint256 amount) external nonReentrant isApprovedToken(token) {
+        // maybe add check to see if platform has tokens?
+        require(s_userToTokenDeposits[msg.sender][token] >= amount, "Insufficient Funds");
         s_userToTokenDeposits[msg.sender][token] -= amount;
         bool success = IERC20(token).transfer(msg.sender, amount);
         if (!success) {
@@ -74,18 +76,22 @@ contract Lending is Ownable, ReentrancyGuard {
         }
 
         require(safetyFactor(msg.sender) >= MIN_USABLE_SAFETY_FACTOR, "You will get Liquidated!");
+        emit Withdraw(msg.sender, token, amount);
     }
 
     function borrow(address token, uint256 amount) external nonReentrant isApprovedToken(token) {
         if (IERC20(token).balanceOf(address(this)) < amount) {
             revert Lending__InsufficentTokensInPlatform();
         }
-        s_userToTokenBorrows[token][msg.sender] += amount;
+        s_userToTokenBorrows[msg.sender][token] += amount;
         emit Borrow(msg.sender, token, amount);
         bool success = IERC20(token).transfer(msg.sender, amount);
         if (!success) {
             revert Lending__TransferFailed();
         }
+        // delete this when done testing
+        //uint256 safetyFactors = safetyFactor(msg.sender);
+        //console.log(safetyFactors);
 
         require(safetyFactor(msg.sender) >= MIN_USABLE_SAFETY_FACTOR, "Deposit more value!");
     }
@@ -142,7 +148,7 @@ contract Lending is Ownable, ReentrancyGuard {
         uint256 totalBorrowedInEth = 0;
         for (uint256 i = 0; i < s_approvedTokenList.length; i++) {
             address token = s_approvedTokenList[i];
-            uint256 amount = s_userToTokenDeposits[user][token];
+            uint256 amount = s_userToTokenBorrows[user][token];
             totalBorrowedInEth += getEthValue(token, amount);
         }
         return totalBorrowedInEth;
@@ -151,6 +157,7 @@ contract Lending is Ownable, ReentrancyGuard {
     function getEthValue(address token, uint256 amount) public view returns (uint256) {
         AggregatorV3Interface priceFeed = AggregatorV3Interface(s_tokenToPriceFeed[token]);
         (, int256 price, , , ) = priceFeed.latestRoundData();
+
         return (uint256(price) * amount) / 1e18;
     }
 
@@ -166,5 +173,13 @@ contract Lending is Ownable, ReentrancyGuard {
         s_approvedTokenList.push(token);
 
         emit TokenApproved(token, priceFeed);
+    }
+
+    function getUserToTokenDeposits(address user, address token) external view returns (uint256) {
+        return s_userToTokenDeposits[user][token];
+    }
+
+    function getUserToTokenBorrows(address user, address token) external view returns (uint256) {
+        return s_userToTokenBorrows[user][token];
     }
 }
